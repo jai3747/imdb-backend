@@ -1,0 +1,17 @@
+# # Chart.yaml
+# apiVersion: v2
+# name: imdb-clone
+# description: A Helm chart for IMDB Clone application with multi-environment support
+# version: 0.1.0
+# type: application
+apiVersion: v2
+name: imdb-clone
+description: A Helm chart for IMDB Clone application with multi-environment support
+version: 0.1.0
+type: application
+
+dependencies:
+  - name: mongodb
+    version: "13.9.4"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: mongodb.enabled

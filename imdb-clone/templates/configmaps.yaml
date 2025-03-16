@@ -1,0 +1,21 @@
+# templates/configmaps.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-configmap
+  namespace: {{ .Values.global.namespace }}
+data:
+  MONGODB_INITDB_DATABASE: {{ .Values.mongodb.database }}
+---
+# update-frontend-config.yaml 
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: imdb-clone
+    component: frontend
+    {{- include "imdb-clone.labels" . | nindent 4 }}
+data:
+  REACT_APP_BACKEND_API: "http://imdb-dev-backend.jayachandran.xyz"
