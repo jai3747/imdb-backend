@@ -18,4 +18,4 @@ metadata:
     component: frontend
     {{- include "imdb-clone.labels" . | nindent 4 }}
 data:
-  REACT_APP_BACKEND_API: "http://imdb-dev-backend.jayachandran.xyz"
+  REACT_APP_BACKEND_API: "http://imdb-app.jayachandran.xyz/api"

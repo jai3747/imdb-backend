@@ -1,3 +1,24 @@
+# templates/backend-deploymnet.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: imdb-clone
+    component: frontend
+    {{- include "imdb-clone.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.frontend.service.type }}
+  ports:
+    - port: {{ .Values.frontend.service.port }}
+      targetPort: {{ .Values.frontend.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    app: imdb-clone
+    component: frontend
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,7 +57,7 @@ spec:
             {{- toYaml .Values.backend.resources | nindent 12 }}
           livenessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: http
             initialDelaySeconds: {{ .Values.backend.probes.liveness.initialDelaySeconds }}
             periodSeconds: {{ .Values.backend.probes.liveness.periodSeconds }}
@@ -44,7 +65,7 @@ spec:
             failureThreshold: {{ .Values.backend.probes.liveness.failureThreshold }}
           readinessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: http
             initialDelaySeconds: {{ .Values.backend.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.backend.probes.readiness.periodSeconds }}
