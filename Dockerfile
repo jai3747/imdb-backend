@@ -12,7 +12,7 @@ RUN rm -f package-lock.json
 RUN npm install
 RUN npm install dotenv cors mongoose express --save
 RUN npm install --save-dev babel-jest
-
+RUN npm install prom-client
 # Copy the rest of the application
 COPY . .
 
