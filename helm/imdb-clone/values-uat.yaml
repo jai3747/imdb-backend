@@ -1,0 +1,88 @@
+# values-staging.yaml
+global:
+  namespace: uat
+  environment: UAT
+
+mongodb:
+  image:
+    repository: bitnami/mongodb  # Changed to bitnami/mongodb for better integration
+    tag: "6.0"
+  architecture: standalone
+  auth:
+    enabled: true
+    rootPassword: "${MONGODB_ROOT_PASSWORD}"  # Use environment variable
+  persistence:
+    enabled: true
+    size: 1Gi
+    mountPath: /data/db  # Explicitly set the correct data directory
+    storageClass: standard-rwo
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  database: imdb-prod
+  securityContext:
+    enabled: true
+    fsGroup: 1001        # Bitnami MongoDB user
+    runAsUser: 1001      # Bitnami MongoDB user
+    runAsNonRoot: true
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1001      # Bitnami MongoDB user
+  volumePermissions:
+    enabled: true        # Enable init container to set permissions
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1001        # Bitnami MongoDB user
+
+backend:
+  replicaCount: 1
+  image:
+    repository: jai3747/imdb-clone-backend
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: LoadBalancer
+    port: 5000
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  probes:
+    readiness:
+      initialDelaySeconds: 20
+      periodSeconds: 20
+    liveness:
+      initialDelaySeconds: 25
+      periodSeconds: 30
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: jai3747/imdb-clone-frontend
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: LoadBalancer
+    port: 3000
+    targetPort: 3000
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  probes:
+    readiness:
+      initialDelaySeconds: 20
+      periodSeconds: 20
+    liveness:
+      initialDelaySeconds: 25
+      periodSeconds: 30

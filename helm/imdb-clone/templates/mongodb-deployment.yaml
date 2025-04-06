@@ -1,0 +1,45 @@
+# templates/mongodb-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "27017"
+    spec:
+      securityContext:
+        {{- toYaml .Values.mongodb.securityContext | nindent 8 }}
+      containers:
+      - name: mongodb
+        image: "{{ .Values.mongodb.image.repository }}:{{ .Values.mongodb.image.tag }}"
+        ports:
+        - containerPort: 27017
+        env:
+        - name: MONGO_INITDB_DATABASE
+          valueFrom:
+            configMapKeyRef:
+              name: mongodb-configmap
+              key: MONGODB_INITDB_DATABASE
+        resources:
+          {{- toYaml .Values.mongodb.resources | nindent 10 }}
+        volumeMounts:
+        - name: mongodb-data
+          mountPath: /data/db
+        - name: mongodb-tmp
+          mountPath: /tmp
+      volumes:
+      - name: mongodb-data
+        persistentVolumeClaim:
+          claimName: mongodb-data
+      - name: mongodb-tmp
+        emptyDir: {}

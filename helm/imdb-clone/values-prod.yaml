@@ -1,0 +1,227 @@
+# global:
+#   namespace: prod
+#   environment: prod
+
+# ingress:
+#   host: "imdb-app.jayachandran.xyz"
+
+# mongodb:
+#   image:
+#     repository: bitnami/mongodb
+#     tag: "6.0"
+#   architecture: standalone
+#   auth:
+#     enabled: true
+#     rootPassword: "${MONGODB_ROOT_PASSWORD}"
+#   persistence:
+#     enabled: true
+#     size: 1Gi
+#     mountPath: /data/db
+#     storageClass: standard-rwo
+#   resources:
+#     requests:
+#       memory: "512Mi"
+#       cpu: "250m"
+#     limits:
+#       memory: "1Gi"
+#       cpu: "500m"
+#   database: imdb-prod
+#   securityContext:
+#     enabled: true
+#     fsGroup: 1001
+#     runAsUser: 1001
+#     runAsNonRoot: true
+#   containerSecurityContext:
+#     enabled: true
+#     runAsUser: 1001
+#   volumePermissions:
+#     enabled: true
+#   podSecurityContext:
+#     enabled: true
+#     fsGroup: 1001
+
+# backend:
+#   replicaCount: 1
+#   image:
+#     repository: jai3747/imdb-clone-backend-prod
+#     tag: latest
+#     pullPolicy: Always
+#   service:
+#     type: ClusterIP
+#     port: 5000
+#   resources:
+#     requests:
+#       memory: "256Mi"
+#       cpu: "100m"
+#     limits:
+#       memory: "512Mi"
+#       cpu: "200m"
+#   probes:
+#     readiness:
+#       initialDelaySeconds: 20
+#       periodSeconds: 20
+#       timeoutSeconds: 1
+#       failureThreshold: 3
+#     liveness:
+#       initialDelaySeconds: 25
+#       periodSeconds: 30
+#       timeoutSeconds: 1
+#       failureThreshold: 3
+#   env:
+#   - name: FRONTEND_URL
+#     value: "http://imdb-app.jayachandran.xyz"
+#   - name: PORT
+#     value: "5000"
+#   - name: NODE_ENV
+#     value: "production"
+#   - name: MONGO_URL
+#     valueFrom:
+#       secretKeyRef:
+#         name: mongodb-credentials
+#         key: mongodb-url
+
+# frontend:
+#   replicaCount: 1
+#   image:
+#     repository: jai3747/imdb-clone-frontend-prod
+#     tag: latest
+#     pullPolicy: Always
+#   service:
+#     type: ClusterIP
+#     port: 3000
+#     targetPort: 3000
+#   resources:
+#     requests:
+#       memory: "256Mi"
+#       cpu: "100m"
+#     limits:
+#       memory: "512Mi"
+#       cpu: "200m"
+#   probes:
+#     readiness:
+#       initialDelaySeconds: 20
+#       periodSeconds: 20
+#       timeoutSeconds: 1
+#       failureThreshold: 3
+#     liveness:
+#       initialDelaySeconds: 25
+#       periodSeconds: 30
+#       timeoutSeconds: 1
+#       failureThreshold: 3
+#   env:
+#   - name: REACT_APP_API_URL
+#     value: "http://imdb-app.jayachandran.xyz/api"
+global:
+  namespace: prod
+  environment: prod
+
+ingress:
+  host: "imdb-app.jayachandran.xyz"
+
+mongodb:
+  image:
+    repository: bitnami/mongodb
+    tag: "6.0"
+  architecture: standalone
+  auth:
+    enabled: true
+    rootPassword: "${MONGODB_ROOT_PASSWORD}"
+  persistence:
+    enabled: true
+    size: 1Gi
+    mountPath: /data/db
+    storageClass: standard-rwo
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  database: imdb-prod
+  securityContext:
+    enabled: true
+    fsGroup: 1001
+    runAsUser: 1001
+    runAsNonRoot: true
+  containerSecurityContext:
+    enabled: true
+    runAsUser: 1001
+  volumePermissions:
+    enabled: true
+  podSecurityContext:
+    enabled: true
+    fsGroup: 1001
+
+backend:
+  replicaCount: 1
+  image:
+    repository: jai3747/imdb-clone-backend-prod
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 5000
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  probes:
+    readiness:
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 1
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 25
+      periodSeconds: 30
+      timeoutSeconds: 1
+      failureThreshold: 3
+  env:
+  - name: FRONTEND_URL
+    value: "http://imdb-app.jayachandran.xyz"
+  - name: PORT
+    value: "5000"
+  - name: NODE_ENV
+    value: "production"
+  - name: MONGO_URL
+  value: "mongodb+srv://JAYACHANDRAN:KQJrxDn44181NsqT@cluster0.w45he.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: jai3747/imdb-clone-frontend-prod
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  probes:
+    readiness:
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 1
+      failureThreshold: 3
+    liveness:
+      initialDelaySeconds: 25
+      periodSeconds: 30
+      timeoutSeconds: 1
+      failureThreshold: 3
+  env:
+  - name: REACT_APP_API_URL
+    value: "http://imdb-app.jayachandran.xyz/api"
+  metrics:
+    enabled: true
+    path: "/metrics"
+    port: 3000
