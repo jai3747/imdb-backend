@@ -1,5 +1,4 @@
-
-name: IaC Security Scan Template
+name: IaC Security Scan
 
 # Trigger on push to main branches, pull requests, weekly, or manually
 on:
@@ -88,7 +87,7 @@ jobs:
             echo "EOF" >> $GITHUB_ENV
           fi
       
-      # Prepare default values files for Helm charts
+      # Prepare Helm values files for charts
       - name: Prepare Helm values
         if: env.HELM_COUNT > 0
         run: |
@@ -102,19 +101,19 @@ jobs:
             chart_name=$(basename "$chart_dir")
             echo "Creating default values file for chart: $chart_name"
             
-            # Create a basic values file that includes common fields that might be needed
-            cat > "./helm-values/${chart_name}-values.yaml" << EOL
+            # Create a basic values file
+            cat > "./helm-values/${chart_name}-values.yaml" << EOF
 # Auto-generated values file for $chart_name
 global:
   namespace: default
   environment: development
-EOL
+EOF
             
-            # If a values.yaml exists in the chart, try to extract the structure
+            # If a values.yaml exists, analyze structure
             if [ -f "$chart_dir/values.yaml" ]; then
               echo "Existing values.yaml found, analyzing structure..."
-              # Try to extract required fields by looking for template references
               template_dirs=$(find "$chart_dir/templates" -type f -name "*.yaml" -o -name "*.yml" -o -name "*.tpl" 2>/dev/null || echo "")
+              
               if [ -n "$template_dirs" ]; then
                 echo "Analyzing templates for required values..."
                 for template in $template_dirs; do
@@ -126,7 +125,7 @@ EOL
                     # Skip global namespace as we already added it
                     if [ "$value_path" == "global.namespace" ]; then continue; fi
                     
-                    # Add the value with a placeholder if it doesn't exist
+                    # Add the value if it doesn't exist
                     if ! grep -q "$value_path:" "./helm-values/${chart_name}-values.yaml"; then
                       # Split the path into components
                       IFS='.' read -ra path_parts <<< "$value_path"
@@ -248,7 +247,7 @@ EOL
           # Run tfsec
           tfsec . --format json > scan-results/tfsec.json || true
       
-      # Helm Chart Scanning with improved error handling
+      # Helm Chart Scanning
       - name: Scan Helm Charts
         if: env.HELM_COUNT > 0
         id: helm-scan
@@ -274,14 +273,14 @@ EOL
               echo "Using custom values file: $values_file"
             fi
             
-            # Try to render templates with debug
+            # Try to render templates
             echo "Attempting to render Helm templates for $chart_name"
-            helm template "$chart_name" "$chart_dir" $values_arg --debug --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name.log" 2>&1 || true
+            helm template "$chart_name" "$chart_dir" $values_arg --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name.log" 2>&1 || true
             
-            # If the first attempt fails, try with --set to add missing values
+            # If first attempt fails, try with additional values
             if [ ! -f "$temp_dir/$chart_name/templates/_helpers.tpl" ] && [ -f "$chart_dir/templates/_helpers.tpl" ]; then
               echo "First template attempt failed, trying with additional default values"
-              helm template "$chart_name" "$chart_dir" $values_arg --set global.namespace=default --debug --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name-retry.log" 2>&1 || true
+              helm template "$chart_name" "$chart_dir" $values_arg --set global.namespace=default --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name-retry.log" 2>&1 || true
             fi
             
             # Check if templates were generated
@@ -305,7 +304,7 @@ EOL
             else
               echo "Failed to render templates for $chart_name. Check logs for details."
               
-              # Look at the error logs to give more helpful information
+              # Extract error information from logs
               if grep -q "nil pointer evaluating" "scan-results/helm-template-$chart_name.log"; then
                 echo "DETECTED NIL POINTER ERROR - Missing values in Helm chart"
                 
@@ -313,11 +312,11 @@ EOL
                 missing_value=$(grep "nil pointer evaluating" "scan-results/helm-template-$chart_name.log" | grep -o '<.*>' | head -1)
                 if [ -n "$missing_value" ]; then
                   echo "Missing value detected: $missing_value"
-                  # Try to add the missing value to our values file
+                  # Add the missing value to values file
                   missing_path=$(echo "$missing_value" | sed 's/<\.Values\.//' | sed 's/>$//')
                   echo "Adding missing path: $missing_path to values file"
                   
-                  # Split the path and create the YAML structure
+                  # Create YAML structure
                   IFS='.' read -ra path_parts <<< "$missing_path"
                   indent=""
                   for i in "${!path_parts[@]}"; do
@@ -335,17 +334,16 @@ EOL
                     fi
                   done
                   
-                  # Try once more with the updated values
+                  # Retry template rendering
                   echo "Retrying template rendering with updated values"
-                  helm template "$chart_name" "$chart_dir" --values "$values_file" --debug --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name-retry2.log" 2>&1 || true
+                  helm template "$chart_name" "$chart_dir" --values "$values_file" --output-dir "$temp_dir" > "scan-results/helm-template-$chart_name-retry2.log" 2>&1 || true
                   
-                  # Check if it worked this time
+                  # Check if second attempt worked
                   template_files=$(find "$temp_dir" -type f -name "*.yaml" -o -name "*.yml" 2>/dev/null || echo "")
                   template_count=$(echo "$template_files" | grep -v "^$" | wc -l)
                   
                   if [ $template_count -gt 0 ]; then
                     echo "Successfully rendered templates on retry"
-                    # Run the same scans as above
                     checkov -d "$temp_dir" --framework kubernetes --output cli --output-file-path "scan-results/helm-$chart_name" || true
                   else
                     echo "Still unable to render templates after retry"
@@ -485,58 +483,6 @@ EOL
           echo "- **Dockerfile Files Scanned:** $DOCKER_COUNT" >> scan-results/summary.md
           echo "- **Terraform Files Scanned:** $TF_COUNT" >> scan-results/summary.md
           echo "- **Helm Charts Scanned:** $HELM_COUNT" >> scan-results/summary.md
-          echo "" >> scan-results/summary.md
-          
-          # Add sections to summary for each framework
-          echo "## Kubernetes Scan Results" >> scan-results/summary.md
-          if [ -f "scan-results/results_kubernetes.txt" ]; then
-            cat scan-results/results_kubernetes.txt >> scan-results/summary.md
-          else
-            echo "No results found. Either no files of this type exist or all checks passed." >> scan-results/summary.md
-          fi
-          echo "---" >> scan-results/summary.md
-          
-          echo "## Docker Scan Results" >> scan-results/summary.md
-          if [ -f "scan-results/results_dockerfile.txt" ]; then
-            cat scan-results/results_dockerfile.txt >> scan-results/summary.md
-          else
-            echo "No results found. Either no files of this type exist or all checks passed." >> scan-results/summary.md
-          fi
-          echo "---" >> scan-results/summary.md
-          
-          echo "## Terraform Scan Results" >> scan-results/summary.md
-          if [ -f "scan-results/results_terraform.txt" ]; then
-            cat scan-results/results_terraform.txt >> scan-results/summary.md
-          else
-            echo "No results found. Either no files of this type exist or all checks passed." >> scan-results/summary.md
-          fi
-          echo "---" >> scan-results/summary.md
-          
-          echo "## Helm Chart Scan Results" >> scan-results/summary.md
-          helm_result_dirs=$(find scan-results -name "helm-*" -type d 2>/dev/null || echo "")
-          if [ -n "$helm_result_dirs" ]; then
-            echo "$helm_result_dirs" | while read -r dir; do
-              if [ -z "$dir" ]; then continue; fi
-              chart_name=$(basename "$dir" | sed 's/helm-//')
-              echo "### $chart_name" >> scan-results/summary.md
-              if [ -f "$dir/results_kubernetes.txt" ]; then
-                cat "$dir/results_kubernetes.txt" >> scan-results/summary.md
-              else
-                echo "No issues found for this chart." >> scan-results/summary.md
-              fi
-            done
-          else
-            echo "No Helm chart scan results available." >> scan-results/summary.md
-          fi
-          echo "---" >> scan-results/summary.md
-          
-          # Add comprehensive results
-          echo "## Overall Results (All Frameworks)" >> scan-results/summary.md
-          if [ -f "scan-results/results.txt" ]; then
-            cat scan-results/results.txt >> scan-results/summary.md
-          else
-            echo "No comprehensive scan results available." >> scan-results/summary.md
-          fi
           
           # Print summary
           echo "============================"
@@ -546,20 +492,13 @@ EOL
           echo "HIGH severity issues: $high_count"
           
           # Set exit code based on findings
-          total_severe=$((critical_count + high_count))
           if [ $critical_count -gt 0 ]; then
             echo "❌ $critical_count CRITICAL severity issues found. See scan-results/critical-severity.md for details."
-            # Export failure flag for later steps
             echo "SCAN_FAILED=true" >> $GITHUB_ENV
-            # Fail the build only on CRITICAL issues
             exit_code=1
           elif [ $high_count -gt 0 ]; then
             echo "⚠️ $high_count HIGH severity issues found. See scan-results/high-severity.md for details."
-            # Export warning flag for later steps
             echo "SCAN_WARNING=true" >> $GITHUB_ENV
-            # By default, don't fail on HIGH issues, but this can be configured
-            # Uncomment the next line to fail on HIGH issues
-            # exit_code=1
             exit_code=0
           else
             echo "✅ No HIGH or CRITICAL severity issues found."
@@ -569,7 +508,7 @@ EOL
           echo "Complete scan results available in scan-results/summary.md"
           echo "============================"
           
-          # Store exit code for next steps but don't exit yet
+          # Store exit code for next steps
           echo "SCAN_EXIT_CODE=$exit_code" >> $GITHUB_ENV
       
       - name: Upload Security Scan Results
@@ -578,5 +517,3 @@ EOL
           name: security-scan-results
           path: scan-results/
           retention-days: 90
-      
-     
