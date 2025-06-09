@@ -1,9 +1,12 @@
+# .github/workflows/trigger.yaml
+
 name: Complete Security Scanning Pipeline
 
 on:
   # Scheduled scanning (daily at 2 AM UTC)
   schedule:
-  - cron: '0 2 * * *'
+    - cron: '0 2 * * *'
+  
   # Manual trigger
   workflow_dispatch:
     inputs:
@@ -13,18 +16,18 @@ on:
         default: 'both'
         type: choice
         options:
-        - 'sca'
-        - 'sast'
-        - 'both'
+          - 'sca'
+          - 'sast'
+          - 'both'
       target_environment:
         description: 'Target environment to scan'
         required: false
         default: 'all'
         type: choice
         options:
-        - 'frontend'
-        - 'backend'
-        - 'all'
+          - 'frontend'
+          - 'backend'
+          - 'all'
       config_file:
         description: 'Configuration file path'
         required: false
@@ -34,11 +37,19 @@ on:
   # Trigger on pull requests for critical branches
   pull_request:
     branches:
-    - main
-    - develop
-    - release/*
+      - main
+      - develop
+      - release/*
     paths:
-    - 'security-config/**'
+      - 'security-config/**'
+
+  # Add push trigger to test the workflow
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'security-config/**'
 
 jobs:
   # Job to validate configuration and determine scan strategy
@@ -50,65 +61,65 @@ jobs:
       run_sast: ${{ steps.determine-scans.outputs.run_sast }}
       config_file: ${{ steps.determine-scans.outputs.config_file }}
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Validate Configuration File
-      run: |
-        CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
+      - name: Validate Configuration File
+        run: |
+          CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
 
-        if [ ! -f "$CONFIG_FILE" ]; then
-          echo "❌ Configuration file not found: $CONFIG_FILE"
-          echo "Please ensure the configuration file exists in your repository."
-          exit 1
-        fi
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "❌ Configuration file not found: $CONFIG_FILE"
+            echo "Please ensure the configuration file exists in your repository."
+            exit 1
+          fi
 
-        # Install yq for validation
-        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-        sudo chmod +x /usr/local/bin/yq
+          # Install yq for validation
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
 
-        # Validate YAML syntax
-        if ! yq eval '.' "$CONFIG_FILE" > /dev/null 2>&1; then
-          echo "❌ Invalid YAML syntax in configuration file"
-          exit 1
-        fi
+          # Validate YAML syntax
+          if ! yq eval '.' "$CONFIG_FILE" > /dev/null 2>&1; then
+            echo "❌ Invalid YAML syntax in configuration file"
+            exit 1
+          fi
 
-        # Check required fields
-        if ! yq eval '.repositories' "$CONFIG_FILE" > /dev/null 2>&1; then
-          echo "❌ Configuration file missing required 'repositories' section"
-          exit 1
-        fi
+          # Check required fields
+          if ! yq eval '.repositories' "$CONFIG_FILE" > /dev/null 2>&1; then
+            echo "❌ Configuration file missing required 'repositories' section"
+            exit 1
+          fi
 
-        # Count repositories
-        REPO_COUNT=$(yq eval '.repositories | length' "$CONFIG_FILE")
-        echo "✅ Configuration validated successfully"
-        echo "📊 Found $REPO_COUNT repositories to scan"
+          # Count repositories
+          REPO_COUNT=$(yq eval '.repositories | length' "$CONFIG_FILE")
+          echo "✅ Configuration validated successfully"
+          echo "📊 Found $REPO_COUNT repositories to scan"
 
-    - name: Determine Scan Types
-      id: determine-scans
-      run: |
-        SCAN_TYPE="${{ github.event.inputs.scan_type || 'both' }}"
-        CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
+      - name: Determine Scan Types
+        id: determine-scans
+        run: |
+          SCAN_TYPE="${{ github.event.inputs.scan_type || 'both' }}"
+          CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
 
-        case "$SCAN_TYPE" in
-          "sca")
-            echo "run_sca=true" >> $GITHUB_OUTPUT
-            echo "run_sast=false" >> $GITHUB_OUTPUT
-            echo "🔍 Will run SCA (Software Composition Analysis) scanning only"
-            ;;
-          "sast")
-            echo "run_sca=false" >> $GITHUB_OUTPUT
-            echo "run_sast=true" >> $GITHUB_OUTPUT
-            echo "🔍 Will run SAST (Static Application Security Testing) scanning only"
-            ;;
-          "both"|*)
-            echo "run_sca=true" >> $GITHUB_OUTPUT
-            echo "run_sast=true" >> $GITHUB_OUTPUT
-            echo "🔍 Will run both SCA and SAST scanning"
-            ;;
-        esac
+          case "$SCAN_TYPE" in
+            "sca")
+              echo "run_sca=true" >> $GITHUB_OUTPUT
+              echo "run_sast=false" >> $GITHUB_OUTPUT
+              echo "🔍 Will run SCA (Software Composition Analysis) scanning only"
+              ;;
+            "sast")
+              echo "run_sca=false" >> $GITHUB_OUTPUT
+              echo "run_sast=true" >> $GITHUB_OUTPUT
+              echo "🔍 Will run SAST (Static Application Security Testing) scanning only"
+              ;;
+            "both"|*)
+              echo "run_sca=true" >> $GITHUB_OUTPUT
+              echo "run_sast=true" >> $GITHUB_OUTPUT
+              echo "🔍 Will run both SCA and SAST scanning"
+              ;;
+          esac
 
-        echo "config_file=$CONFIG_FILE" >> $GITHUB_OUTPUT
+          echo "config_file=$CONFIG_FILE" >> $GITHUB_OUTPUT
 
   # SCA Scanning Job
   run-sca-scan:
@@ -143,29 +154,29 @@ jobs:
     needs: [ prepare-scan, run-sca-scan, run-sast-scan ]
     if: always() && needs.prepare-scan.result == 'success'
     steps:
-    - name: Scan Summary
-      run: |
-        echo "🛡️ Security Scanning Complete"
-        echo "Scan Date: $(date)"
-        echo "Repository: ${{ github.repository }}"
-        echo "Branch: ${{ github.ref_name }}"
-        echo ""
-        
-        if [ "${{ needs.prepare-scan.outputs.run_sca }}" == "true" ]; then
-          if [ "${{ needs.run-sca-scan.result }}" == "success" ]; then
-            echo "✅ SCA Scan: Completed Successfully"
-          else
-            echo "⚠️ SCA Scan: Completed with Issues"
+      - name: Scan Summary
+        run: |
+          echo "🛡️ Security Scanning Complete"
+          echo "Scan Date: $(date)"
+          echo "Repository: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo ""
+          
+          if [ "${{ needs.prepare-scan.outputs.run_sca }}" == "true" ]; then
+            if [ "${{ needs.run-sca-scan.result }}" == "success" ]; then
+              echo "✅ SCA Scan: Completed Successfully"
+            else
+              echo "⚠️ SCA Scan: Completed with Issues"
+            fi
           fi
-        fi
 
-        if [ "${{ needs.prepare-scan.outputs.run_sast }}" == "true" ]; then
-          if [ "${{ needs.run-sast-scan.result }}" == "success" ]; then
-            echo "✅ SAST Scan: Completed Successfully"
-          else
-            echo "⚠️ SAST Scan: Completed with Issues"
+          if [ "${{ needs.prepare-scan.outputs.run_sast }}" == "true" ]; then
+            if [ "${{ needs.run-sast-scan.result }}" == "success" ]; then
+              echo "✅ SAST Scan: Completed Successfully"
+            else
+              echo "⚠️ SAST Scan: Completed with Issues"
+            fi
           fi
-        fi
-        
-        echo ""
-        echo "📁 Check workflow artifacts for detailed scan reports"
+          
+          echo ""
+          echo "📁 Check workflow artifacts for detailed scan reports"

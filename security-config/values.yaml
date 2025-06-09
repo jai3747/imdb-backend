@@ -10,7 +10,6 @@ repositories:
   description: "Food Waste Management System"
   install_command: "" # Leave empty to use default pip install
 
-
 # Global scanning settings
 settings:
   # Scan scheduling
