@@ -1,0 +1,274 @@
+name: Complete Security Scanning Pipeline
+
+on:
+  # Scheduled scanning (daily at 2 AM UTC)
+  schedule:
+    - cron: '0 2 * * *'
+  
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: 'Type of scan to run'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - 'sca'
+          - 'sast'
+          - 'both'
+      target_environment:
+        description: 'Target environment to scan'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - 'frontend'
+          - 'backend'
+          - 'all'
+      config_file:
+        description: 'Configuration file path'
+        required: false
+        default: 'security-config/values.yaml'
+        type: string
+
+  # Trigger on pull requests for critical branches
+  pull_request:
+    branches:
+      - main
+      - develop
+      - release/*
+    paths:
+      - 'security-config/**'
+
+jobs:
+  # Job to validate configuration and determine scan strategy
+  prepare-scan:
+    name: 🛠️ Prepare Security Scan
+    runs-on: ubuntu-latest
+    outputs:
+      run_sca: ${{ steps.determine-scans.outputs.run_sca }}
+      run_sast: ${{ steps.determine-scans.outputs.run_sast }}
+      config_file: ${{ steps.determine-scans.outputs.config_file }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Validate Configuration File
+      run: |
+        CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
+        
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo "❌ Configuration file not found: $CONFIG_FILE"
+          echo "Please ensure the configuration file exists in your repository."
+          exit 1
+        fi
+        
+        # Install yq for validation
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+        
+        # Validate YAML syntax
+        if ! yq eval '.' "$CONFIG_FILE" > /dev/null 2>&1; then
+          echo "❌ Invalid YAML syntax in configuration file"
+          exit 1
+        fi
+        
+        # Check required fields
+        if ! yq eval '.repositories' "$CONFIG_FILE" > /dev/null 2>&1; then
+          echo "❌ Configuration file missing required 'repositories' section"
+          exit 1
+        fi
+        
+        # Count repositories
+        REPO_COUNT=$(yq eval '.repositories | length' "$CONFIG_FILE")
+        echo "✅ Configuration validated successfully"
+        echo "📊 Found $REPO_COUNT repositories to scan"
+
+    - name: Determine Scan Types
+      id: determine-scans
+      run: |
+        SCAN_TYPE="${{ github.event.inputs.scan_type || 'both' }}"
+        CONFIG_FILE="${{ github.event.inputs.config_file || 'security-config/values.yaml' }}"
+        
+        case "$SCAN_TYPE" in
+          "sca")
+            echo "run_sca=true" >> $GITHUB_OUTPUT
+            echo "run_sast=false" >> $GITHUB_OUTPUT
+            echo "🔍 Will run SCA (Software Composition Analysis) scanning only"
+            ;;
+          "sast")
+            echo "run_sca=false" >> $GITHUB_OUTPUT
+            echo "run_sast=true" >> $GITHUB_OUTPUT
+            echo "🔍 Will run SAST (Static Application Security Testing) scanning only"
+            ;;
+          "both"|*)
+            echo "run_sca=true" >> $GITHUB_OUTPUT
+            echo "run_sast=true" >> $GITHUB_OUTPUT
+            echo "🔍 Will run both SCA and SAST scanning"
+            ;;
+        esac
+        
+        echo "config_file=$CONFIG_FILE" >> $GITHUB_OUTPUT
+
+  # SCA Scanning Job
+  run-sca-scan:
+    name: 📦 Software Composition Analysis
+    needs: prepare-scan
+    if: needs.prepare-scan.outputs.run_sca == 'true'
+    uses: ./.github/workflows/sca-template.yml
+    with:
+      config_file: ${{ needs.prepare-scan.outputs.config_file }}
+      target_environment: ${{ github.event.inputs.target_environment || 'all' }}
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # SAST Scanning Job
+  run-sast-scan:
+    name: 🔍 Static Application Security Testing
+    needs: prepare-scan
+    if: needs.prepare-scan.outputs.run_sast == 'true'
+    uses: ./.github/workflows/sast-template.yml
+    with:
+      config_file: ${{ needs.prepare-scan.outputs.config_file }}
+      target_environment: ${{ github.event.inputs.target_environment || 'all' }}
+    secrets:
+      GH_PAT: ${{ secrets.GH_PAT }}
+      SEMGREP_TOKEN: ${{ secrets.SEMGREP_TOKEN }}
+
+  # Final consolidation and notification job
+  finalize-scan:
+    name: 📊 Finalize Security Scan
+    runs-on: ubuntu-latest
+    needs: [prepare-scan, run-sca-scan, run-sast-scan]
+    if: always() && needs.prepare-scan.result == 'success'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Download All Reports
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-reports
+
+    - name: Generate Executive Summary
+      run: |
+        echo "# 🛡️ Security Scanning Executive Summary" > executive-summary.md
+        echo "" >> executive-summary.md
+        echo "**Scan Date**: $(date)" >> executive-summary.md
+        echo "**Triggered By**: ${{ github.actor }}" >> executive-summary.md
+        echo "**Repository**: ${{ github.repository }}" >> executive-summary.md
+        echo "**Branch**: ${{ github.ref_name }}" >> executive-summary.md
+        echo "" >> executive-summary.md
+        
+        # Scan Status Summary
+        echo "## 📋 Scan Status" >> executive-summary.md
+        echo "" >> executive-summary.md
+        
+        SCA_STATUS="❌ Skipped"
+        SAST_STATUS="❌ Skipped"
+        
+        if [ "${{ needs.prepare-scan.outputs.run_sca }}" == "true" ]; then
+          if [ "${{ needs.run-sca-scan.result }}" == "success" ]; then
+            SCA_STATUS="✅ Completed Successfully"
+          else
+            SCA_STATUS="⚠️ Completed with Issues"
+          fi
+        fi
+        
+        if [ "${{ needs.prepare-scan.outputs.run_sast }}" == "true" ]; then
+          if [ "${{ needs.run-sast-scan.result }}" == "success" ]; then
+            SAST_STATUS="✅ Completed Successfully"
+          else
+            SAST_STATUS="⚠️ Completed with Issues"
+          fi
+        fi
+        
+        echo "- **SCA (Software Composition Analysis)**: $SCA_STATUS" >> executive-summary.md
+        echo "- **SAST (Static Application Security Testing)**: $SAST_STATUS" >> executive-summary.md
+        echo "" >> executive-summary.md
+        
+        # Repository Summary
+        if [ -f "${{ needs.prepare-scan.outputs.config_file }}" ]; then
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          TOTAL_REPOS=$(yq eval '.repositories | length' "${{ needs.prepare-scan.outputs.config_file }}")
+          echo "## 📊 Repository Coverage" >> executive-summary.md
+          echo "" >> executive-summary.md
+          echo "- **Total Repositories**: $TOTAL_REPOS" >> executive-summary.md
+          echo "- **Languages Covered**: $(yq eval '.repositories[].language' "${{ needs.prepare-scan.outputs.config_file }}" | sort -u | tr '\n' ', ' | sed 's/,$//')" >> executive-summary.md
+          echo "" >> executive-summary.md
+        fi
+        
+        # Report Links
+        echo "## 📁 Detailed Reports" >> executive-summary.md
+        echo "" >> executive-summary.md
+        echo "Detailed reports are available in the workflow artifacts:" >> executive-summary.md
+        echo "" >> executive-summary.md
+        
+        if [ "${{ needs.prepare-scan.outputs.run_sca }}" == "true" ]; then
+          echo "- 📦 **SCA Reports**: Look for \`consolidated-sca-report\` and individual \`sca-report-*\` artifacts" >> executive-summary.md
+        fi
+        
+        if [ "${{ needs.prepare-scan.outputs.run_sast }}" == "true" ]; then
+          echo "- 🔍 **SAST Reports**: Look for \`consolidated-sast-report\` and individual \`sast-report-*\` artifacts" >> executive-summary.md
+        fi
+        
+        echo "" >> executive-summary.md
+        echo "## 🔗 Quick Links" >> executive-summary.md
+        echo "" >> executive-summary.md
+        echo "- [View Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> executive-summary.md
+        echo "- [Download All Artifacts](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)" >> executive-summary.md
+        echo "" >> executive-summary.md
+        echo "---" >> executive-summary.md
+        echo "*Generated by GitHub Actions Security Pipeline*" >> executive-summary.md
+
+    - name: Check for Critical Issues
+      id: check-critical
+      run: |
+        CRITICAL_ISSUES_FOUND=false
+        CRITICAL_COUNT=0
+        
+        # Check SCA reports for critical vulnerabilities
+        if [ -d "./all-reports" ]; then
+          for report in ./all-reports/*/snyk-*-report.json; do
+            if [ -f "$report" ]; then
+              CRITICAL_VULNS=$(jq '.vulnerabilities | map(select(.severity == "critical")) | length' "$report" 2>/dev/null || echo "0")
+              if [ "$CRITICAL_VULNS" -gt 0 ]; then
+                CRITICAL_ISSUES_FOUND=true
+                CRITICAL_COUNT=$((CRITICAL_COUNT + CRITICAL_VULNS))
+              fi
+            fi
+          done
+          
+          # Check SAST reports for critical issues
+          for report in ./all-reports/*/semgrep-*-results.json; do
+            if [ -f "$report" ]; then
+              ERROR_FINDINGS=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "$report" 2>/dev/null || echo "0")
+              if [ "$ERROR_FINDINGS" -gt 0 ]; then
+                CRITICAL_ISSUES_FOUND=true
+                CRITICAL_COUNT=$((CRITICAL_COUNT + ERROR_FINDINGS))
+              fi
+            fi
+          done
+        fi
+        
+        echo "critical_found=$CRITICAL_ISSUES_FOUND" >> $GITHUB_OUTPUT
+        echo "critical_count=$CRITICAL_COUNT" >> $GITHUB_OUTPUT
+        
+        if [ "$CRITICAL_ISSUES_FOUND" = true ]; then
+          echo "⚠️ CRITICAL SECURITY ISSUES DETECTED: $CRITICAL_COUNT issues found"
+          echo "Please review the detailed reports immediately."
+        else
+          echo "✅ No critical security issues detected"
+        fi
+
+    - name: Upload Executive Summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: executive-summary
+        path: executive-summary.md
+        retention-days: 90
+
