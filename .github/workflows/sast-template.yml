@@ -1,0 +1,407 @@
+name: SAST (Static Application Security Testing) Scanning
+
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        required: true
+        type: string
+        description: "Path to the scanning configuration file"
+      target_environment:
+        required: false
+        type: string
+        default: "all"
+        description: "Target environment to scan (frontend/backend/all)"
+    secrets:
+      GH_PAT:
+        required: true
+      SEMGREP_TOKEN:
+        required: true
+
+jobs:
+  load-config:
+    name: 📋 Load Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.parse-config.outputs.config }}
+      repositories: ${{ steps.parse-config.outputs.repositories }}
+    steps:
+    - name: Checkout Config Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_PAT }}
+
+    - name: Parse Configuration
+      id: parse-config
+      run: |
+        if [ ! -f "${{ inputs.config_file }}" ]; then
+          echo "Configuration file not found: ${{ inputs.config_file }}"
+          exit 1
+        fi
+
+        # Install yq for YAML parsing
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+
+        # Extract configuration
+        CONFIG=$(cat "${{ inputs.config_file }}")
+        echo "config<<EOF" >> $GITHUB_OUTPUT
+        echo "$CONFIG" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        # Extract repositories list
+        REPOS=$(yq e '.repositories | @json' "${{ inputs.config_file }}")
+        echo "repositories=$REPOS" >> $GITHUB_OUTPUT
+
+  sast-scan:
+    name: 🔍 SAST Scan - ${{ matrix.repo.name }}
+    runs-on: ubuntu-latest
+    needs: load-config
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.load-config.outputs.repositories) }}
+      fail-fast: false
+    steps:
+    - name: Clean workspace
+      run: |
+        rm -rf * || true
+        rm -rf .git || true
+        rm -rf .[^.]* || true
+
+    - name: Checkout Target Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ matrix.repo.repository }}
+        token: ${{ secrets.GH_PAT }}
+        clean: true
+
+    - name: Setup Runtime Environment
+      run: |
+        case "${{ matrix.repo.language }}" in
+          "node"|"javascript"|"typescript")
+            echo "Setting up Node.js environment for SAST scanning"
+            ;;
+          "python")
+            echo "Setting up Python environment for SAST scanning"
+            ;;
+          "php")
+            echo "Setting up PHP environment for SAST scanning"
+            ;;
+          "dotnet"|"csharp")
+            echo "Setting up .NET environment for SAST scanning"
+            ;;
+          *)
+            echo "Language ${{ matrix.repo.language }} will be scanned with generic rules"
+            ;;
+        esac
+
+    - name: Get Semgrep Configuration
+      id: semgrep-config
+      run: |
+        # Define configurations based on language
+        case "${{ matrix.repo.language }}" in
+          "node"|"javascript")
+            echo "config=p/security-audit p/javascript p/nodejs p/owasp-top-ten p/xss" >> $GITHUB_OUTPUT
+            ;;
+          "typescript")
+            echo "config=p/security-audit p/javascript p/typescript p/react p/nodejs p/owasp-top-ten" >> $GITHUB_OUTPUT
+            ;;
+          "python")
+            echo "config=p/security-audit p/python p/flask p/django p/owasp-top-ten p/sql-injection" >> $GITHUB_OUTPUT
+            ;;
+          "php")
+            echo "config=p/security-audit p/php p/laravel p/symfony p/owasp-top-ten p/sql-injection" >> $GITHUB_OUTPUT
+            ;;
+          "dotnet"|"csharp")
+            echo "config=p/security-audit p/csharp p/dotnet p/owasp-top-ten p/sql-injection" >> $GITHUB_OUTPUT
+            ;;
+          *)
+            echo "config=p/security-audit p/owasp-top-ten" >> $GITHUB_OUTPUT
+            ;;
+        esac
+
+    - name: Run Semgrep SARIF
+      uses: semgrep/semgrep-action@v1
+      continue-on-error: true
+      env:
+        SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_TOKEN }}
+      with:
+        config: ${{ steps.semgrep-config.outputs.config }}
+        generateSarif: "1"
+
+    - name: Run Semgrep JSON Output
+      continue-on-error: true
+      env:
+        SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_TOKEN }}
+      run: |
+        # Install Semgrep
+        python3 -m pip install semgrep
+
+        # Run Semgrep with JSON output
+        semgrep --config=${{ steps.semgrep-config.outputs.config }} --json --output=semgrep-${{ matrix.repo.name }}-results.json . || true
+
+        # Also run with verbose output for debugging
+        semgrep --config=${{ steps.semgrep-config.outputs.config }} --verbose . > semgrep-${{ matrix.repo.name }}-verbose.log 2>&1 || true
+
+    - name: Run Additional Language-Specific Tools
+      continue-on-error: true
+      run: |
+        case "${{ matrix.repo.language }}" in
+          "python")
+            # Install and run bandit for Python
+            pip install bandit
+            bandit -r . -f json -o bandit-${{ matrix.repo.name }}-results.json || true
+            ;;
+          "php")
+            # Install and run PHPStan for PHP (if composer.json exists)
+            if [ -f composer.json ]; then
+              composer require --dev phpstan/phpstan || true
+              ./vendor/bin/phpstan analyse --error-format=json > phpstan-${{ matrix.repo.name }}-results.json || true
+            fi
+            ;;
+          "dotnet"|"csharp")
+            # Run Security Code Scan for .NET
+            dotnet tool install --global security-scan || true
+            security-scan . --export=sarif --output=security-scan-${{ matrix.repo.name }}-results.sarif || true
+            ;;
+        esac
+
+    - name: Generate Summary Report
+      if: always()
+      run: |
+        echo "# 🔍 ${{ matrix.repo.name }} SAST Scan Results" > sast-scan-summary.md
+        echo "## Repository: ${{ matrix.repo.repository }}" >> sast-scan-summary.md
+        echo "## Language: ${{ matrix.repo.language }}" >> sast-scan-summary.md
+        echo "## Environment: ${{ matrix.repo.environment }}" >> sast-scan-summary.md
+        echo "## Scan Date: $(date)" >> sast-scan-summary.md
+        echo "" >> sast-scan-summary.md
+
+        SEMGREP_FILE="semgrep-${{ matrix.repo.name }}-results.json"
+        TOTAL_FINDINGS=0
+
+        if [ -f "$SEMGREP_FILE" ]; then
+          # Parse Semgrep JSON report
+          TOTAL_FINDINGS=$(jq '.results | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          HIGH_FINDINGS=$(jq '[.results[] | select(.extra.severity == "HIGH")] | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          MEDIUM_FINDINGS=$(jq '[.results[] | select(.extra.severity == "MEDIUM")] | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          LOW_FINDINGS=$(jq '[.results[] | select(.extra.severity == "LOW")] | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          ERROR_FINDINGS=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          INFO_FINDINGS=$(jq '[.results[] | select(.extra.severity == "INFO")] | length' "$SEMGREP_FILE" 2>/dev/null || echo "0")
+          
+          echo "### 🔍 Semgrep Security Findings:" >> sast-scan-summary.md
+          echo "- 🔴 Error: $ERROR_FINDINGS" >> sast-scan-summary.md
+          echo "- 🟠 High: $HIGH_FINDINGS" >> sast-scan-summary.md
+          echo "- 🟡 Medium: $MEDIUM_FINDINGS" >> sast-scan-summary.md
+          echo "- 🟢 Low: $LOW_FINDINGS" >> sast-scan-summary.md
+          echo "- ℹ️ Info: $INFO_FINDINGS" >> sast-scan-summary.md
+          echo "- **Total**: $TOTAL_FINDINGS" >> sast-scan-summary.md
+          echo "" >> sast-scan-summary.md
+        fi
+
+        # Add language-specific tool results
+        case "${{ matrix.repo.language }}" in
+          "python")
+            BANDIT_FILE="bandit-${{ matrix.repo.name }}-results.json"
+            if [ -f "$BANDIT_FILE" ]; then
+              BANDIT_HIGH=$(jq '[.results[] | select(.issue_severity == "HIGH")] | length' "$BANDIT_FILE" 2>/dev/null || echo "0")
+              BANDIT_MEDIUM=$(jq '[.results[] | select(.issue_severity == "MEDIUM")] | length' "$BANDIT_FILE" 2>/dev/null || echo "0")
+              BANDIT_LOW=$(jq '[.results[] | select(.issue_severity == "LOW")] | length' "$BANDIT_FILE" 2>/dev/null || echo "0")
+              BANDIT_TOTAL=$((BANDIT_HIGH + BANDIT_MEDIUM + BANDIT_LOW))
+              
+              echo "### 🐍 Bandit Python Security Findings:" >> sast-scan-summary.md
+              echo "- 🟠 High: $BANDIT_HIGH" >> sast-scan-summary.md
+              echo "- 🟡 Medium: $BANDIT_MEDIUM" >> sast-scan-summary.md
+              echo "- 🟢 Low: $BANDIT_LOW" >> sast-scan-summary.md
+              echo "- **Total**: $BANDIT_TOTAL" >> sast-scan-summary.md
+              echo "" >> sast-scan-summary.md
+              
+              TOTAL_FINDINGS=$((TOTAL_FINDINGS + BANDIT_TOTAL))
+            fi
+            ;;
+          "php")
+            if [ -f "phpstan-${{ matrix.repo.name }}-results.json" ]; then
+              echo "### 🐘 PHPStan Analysis Results:" >> sast-scan-summary.md
+              echo "- PHPStan analysis completed (see detailed report)" >> sast-scan-summary.md
+              echo "" >> sast-scan-summary.md
+            fi
+            ;;
+          "dotnet"|"csharp")
+            if [ -f "security-scan-${{ matrix.repo.name }}-results.sarif" ]; then
+              echo "### 🔷 .NET Security Code Scan Results:" >> sast-scan-summary.md
+              echo "- Security Code Scan completed (see SARIF report)" >> sast-scan-summary.md
+              echo "" >> sast-scan-summary.md
+            fi
+            ;;
+        esac
+
+        # Generate overall summary
+        if [ "$TOTAL_FINDINGS" -gt 0 ]; then
+          echo "## ⚠️ Action Required: $TOTAL_FINDINGS security issues found" >> sast-scan-summary.md
+          echo "" >> sast-scan-summary.md
+          echo "### 📋 Remediation Priorities:" >> sast-scan-summary.md
+          echo "1. **Critical/High Issues**: Address immediately" >> sast-scan-summary.md
+          echo "2. **Medium Issues**: Plan for next sprint" >> sast-scan-summary.md
+          echo "3. **Low/Info Issues**: Address during regular maintenance" >> sast-scan-summary.md
+          echo "" >> sast-scan-summary.md
+          
+          # Show top priority issues from Semgrep
+          if [ -f "$SEMGREP_FILE" ]; then
+            echo "### 🎯 Top Priority Issues (Semgrep):" >> sast-scan-summary.md
+            jq -r '.results[] | select(.extra.severity == "HIGH" or .extra.severity == "ERROR") | "- **\(.check_id)**: \(.extra.message) (Line: \(.start.line), File: \(.path | split("/") | last))"' "$SEMGREP_FILE" | head -10 >> sast-scan-summary.md 2>/dev/null || true
+            echo "" >> sast-scan-summary.md
+          fi
+          
+          # Add language-specific recommendations
+          echo "### 🔧 Language-Specific Recommendations:" >> sast-scan-summary.md
+          case "${{ matrix.repo.language }}" in
+            "node"|"javascript"|"typescript")
+              echo "- Enable ESLint security rules in your project" >> sast-scan-summary.md
+              echo "- Use \`npm audit\` regularly for dependency vulnerabilities" >> sast-scan-summary.md
+              echo "- Implement Content Security Policy (CSP) headers" >> sast-scan-summary.md
+              ;;
+            "python")
+              echo "- Add Bandit to your CI/CD pipeline" >> sast-scan-summary.md
+              echo "- Use \`safety\` to check for known vulnerabilities in dependencies" >> sast-scan-summary.md
+              echo "- Implement proper input validation and sanitization" >> sast-scan-summary.md
+              ;;
+            "php")
+              echo "- Use PHPStan for static analysis in development" >> sast-scan-summary.md
+              echo "- Implement proper input validation and output encoding" >> sast-scan-summary.md
+              echo "- Use prepared statements for database queries" >> sast-scan-summary.md
+              ;;
+            "dotnet"|"csharp")
+              echo "- Enable Code Analysis in Visual Studio/MSBuild" >> sast-scan-summary.md
+              echo "- Use Security Code Scan analyzer package" >> sast-scan-summary.md
+              echo "- Implement proper input validation and output encoding" >> sast-scan-summary.md
+              ;;
+          esac
+        else
+          echo "## ✅ No security issues detected" >> sast-scan-summary.md
+          echo "" >> sast-scan-summary.md
+          echo "Great job! Your code appears to be free of common security vulnerabilities." >> sast-scan-summary.md
+          echo "" >> sast-scan-summary.md
+          echo "### 🔄 Continuous Security:" >> sast-scan-summary.md
+          echo "- Keep dependencies up to date" >> sast-scan-summary.md
+          echo "- Run security scans regularly" >> sast-scan-summary.md
+          echo "- Follow secure coding practices" >> sast-scan-summary.md
+        fi
+
+        # Add scan coverage information
+        echo "" >> sast-scan-summary.md
+        echo "### 📊 Scan Coverage:" >> sast-scan-summary.md
+        echo "- **Language**: ${{ matrix.repo.language }}" >> sast-scan-summary.md
+        echo "- **Rules Applied**: Security audit, OWASP Top 10, Language-specific" >> sast-scan-summary.md
+        echo "- **Files Scanned**: $(find . -type f -name "*.$(echo ${{ matrix.repo.language }} | sed 's/node/js/;s/dotnet/cs/;s/csharp/cs/')" | wc -l 2>/dev/null || echo "N/A")" >> sast-scan-summary.md
+        echo "- **Scan Duration**: $(date)" >> sast-scan-summary.md
+
+    - name: Upload Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sast-report-${{ matrix.repo.name }}
+        path: |
+          semgrep-${{ matrix.repo.name }}-results.json
+          semgrep-${{ matrix.repo.name }}-verbose.log
+          bandit-${{ matrix.repo.name }}-results.json
+          phpstan-${{ matrix.repo.name }}-results.json
+          security-scan-${{ matrix.repo.name }}-results.sarif
+          results.sarif
+          sast-scan-summary.md
+        retention-days: 30
+
+  consolidate-results:
+    name: 📊 Consolidate SAST Results
+    runs-on: ubuntu-latest
+    needs: [ load-config, sast-scan ]
+    if: always()
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./reports
+
+    - name: Generate Consolidated Report
+      run: |
+        echo "# 🔍 Consolidated SAST Scan Results" > consolidated-sast-report.md
+        echo "## Scan Date: $(date)" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+
+        TOTAL_REPOS=0
+        TOTAL_ISSUES=0
+        REPOS_WITH_ISSUES=0
+
+        echo "## 📈 Executive Summary" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+
+        # Process each report
+        for report_dir in ./reports/sast-report-*/; do
+          if [ -d "$report_dir" ]; then
+            TOTAL_REPOS=$((TOTAL_REPOS + 1))
+            REPO_NAME=$(basename "$report_dir" | sed 's/sast-report-//')
+            
+            # Count issues in this repo
+            REPO_ISSUES=0
+            if [ -f "$report_dir/semgrep-$REPO_NAME-results.json" ]; then
+              REPO_ISSUES=$(jq '.results | length' "$report_dir/semgrep-$REPO_NAME-results.json" 2>/dev/null || echo "0")
+            fi
+            
+            if [ "$REPO_ISSUES" -gt 0 ]; then
+              REPOS_WITH_ISSUES=$((REPOS_WITH_ISSUES + 1))
+              TOTAL_ISSUES=$((TOTAL_ISSUES + REPO_ISSUES))
+            fi
+          fi
+        done
+
+        echo "- **Total Repositories Scanned**: $TOTAL_REPOS" >> consolidated-sast-report.md
+        echo "- **Repositories with Issues**: $REPOS_WITH_ISSUES" >> consolidated-sast-report.md
+        echo "- **Total Security Issues**: $TOTAL_ISSUES" >> consolidated-sast-report.md
+        echo "- **Clean Repositories**: $((TOTAL_REPOS - REPOS_WITH_ISSUES))" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+
+        if [ "$TOTAL_ISSUES" -gt 0 ]; then
+          echo "## ⚠️ Repositories Requiring Attention" >> consolidated-sast-report.md
+          echo "" >> consolidated-sast-report.md
+        else
+          echo "## ✅ All Repositories Clean" >> consolidated-sast-report.md
+          echo "" >> consolidated-sast-report.md
+          echo "Congratulations! No security issues were found in any of the scanned repositories." >> consolidated-sast-report.md
+          echo "" >> consolidated-sast-report.md
+        fi
+
+        echo "## 📁 Individual Repository Results" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+
+        # Process each report for detailed breakdown
+        for report_dir in ./reports/sast-report-*/; do
+          if [ -d "$report_dir" ]; then
+            REPO_NAME=$(basename "$report_dir" | sed 's/sast-report-//')
+            echo "### 📂 $REPO_NAME" >> consolidated-sast-report.md
+            
+            if [ -f "$report_dir/sast-scan-summary.md" ]; then
+              # Extract key information from individual reports
+              grep -A 15 "Security Findings:" "$report_dir/sast-scan-summary.md" | head -10 >> consolidated-sast-report.md 2>/dev/null || echo "- ❌ Report not available" >> consolidated-sast-report.md
+            else
+              echo "- ❌ Report not available" >> consolidated-sast-report.md
+            fi
+            echo "" >> consolidated-sast-report.md
+          fi
+        done
+
+        echo "---" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+        echo "## 📋 Next Steps" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+        echo "1. **Prioritize Critical/High Issues**: Address security vulnerabilities marked as critical or high severity first" >> consolidated-sast-report.md
+        echo "2. **Review Medium Issues**: Plan remediation for medium severity issues in upcoming sprints" >> consolidated-sast-report.md
+        echo "3. **Establish Security Gates**: Consider blocking deployments for repositories with critical security issues" >> consolidated-sast-report.md
+        echo "4. **Developer Training**: Provide security training for common vulnerability patterns found" >> consolidated-sast-report.md
+        echo "5. **Regular Scanning**: Implement regular security scanning in your CI/CD pipelines" >> consolidated-sast-report.md
+        echo "" >> consolidated-sast-report.md
+        echo "*Generated by GitHub Actions SAST Pipeline*" >> consolidated-sast-report.md
+
+    - name: Upload Consolidated Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: consolidated-sast-report
+        path: consolidated-sast-report.md
+        retention-days: 90
