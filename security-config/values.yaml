@@ -3,25 +3,25 @@
 
 repositories:
 - name: food-waste-management
-  repository: jai3747/food_waste_management
-  language: python
-  runtime_version: "3.9"
+  repository: jai3747/imdb-backend
+  language: node
+  runtime_version: "20"
   environment: backend
   description: "Food Waste Management System"
-  install_command: "" # Leave empty to use default pip install
+  install_command: ""
 
 # Global scanning settings
 settings:
   # Scan scheduling
   schedule:
     enabled: false
-    cron: "0 2 * * *" # Daily at 2 AM UTC
+    cron: "0 2 * * *"
 
   # Security thresholds
   thresholds:
-    critical: 0 # Fail if any critical vulnerabilities
-    high: 5 # Fail if more than 5 high vulnerabilities
-    medium: 20 # Fail if more than 20 medium vulnerabilities
+    critical: 0
+    high: 5
+    medium: 20
 
   # Notification settings
   notifications:
