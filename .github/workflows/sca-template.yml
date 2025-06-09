@@ -1,0 +1,338 @@
+name: SCA (Software Composition Analysis) Scanning
+
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        required: true
+        type: string
+        description: "Path to the scanning configuration file"
+      target_environment:
+        required: false
+        type: string
+        default: "all"
+        description: "Target environment to scan (frontend/backend/all)"
+    secrets:
+      GH_PAT:
+        required: true
+      SNYK_TOKEN:
+        required: true
+
+jobs:
+  load-config:
+    name: 📋 Load Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      config: ${{ steps.parse-config.outputs.config }}
+      repositories: ${{ steps.parse-config.outputs.repositories }}
+    steps:
+    - name: Checkout Config Repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GH_PAT }}
+
+    - name: Parse Configuration
+      id: parse-config
+      run: |
+        if [ ! -f "${{ inputs.config_file }}" ]; then
+          echo "Configuration file not found: ${{ inputs.config_file }}"
+          exit 1
+        fi
+
+        # Install yq for YAML parsing
+        sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+        sudo chmod +x /usr/local/bin/yq
+
+        # Extract configuration
+        CONFIG=$(cat "${{ inputs.config_file }}")
+        echo "config<<EOF" >> $GITHUB_OUTPUT
+        echo "$CONFIG" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+        # Extract repositories list
+        REPOS=$(yq e '.repositories | @json' "${{ inputs.config_file }}")
+        echo "repositories=$REPOS" >> $GITHUB_OUTPUT
+
+  sca-scan:
+    name: 📦 SCA Scan - ${{ matrix.repo.name }}
+    runs-on: ubuntu-latest
+    needs: load-config
+    strategy:
+      matrix:
+        repo: ${{ fromJson(needs.load-config.outputs.repositories) }}
+      fail-fast: false
+    steps:
+    - name: Clean workspace
+      run: |
+        rm -rf * || true
+        rm -rf .git || true
+        rm -rf .[^.]* || true
+
+    - name: Checkout Target Repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ matrix.repo.repository }}
+        token: ${{ secrets.GH_PAT }}
+        clean: true
+
+    - name: Setup Runtime Environment
+      run: |
+        case "${{ matrix.repo.language }}" in
+          "node"|"javascript"|"typescript")
+            echo "Setting up Node.js environment"
+            ;;
+          "python")
+            echo "Setting up Python environment"
+            ;;
+          "php")
+            echo "Setting up PHP environment"
+            ;;
+          "dotnet"|"csharp")
+            echo "Setting up .NET environment"
+            ;;
+          *)
+            echo "Unknown language: ${{ matrix.repo.language }}"
+            ;;
+        esac
+
+    - name: Setup Node.js
+      if: matrix.repo.language == 'node' || matrix.repo.language == 'javascript' || matrix.repo.language == 'typescript'
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.repo.runtime_version || '18' }}
+        cache: 'npm'
+
+    - name: Setup Python
+      if: matrix.repo.language == 'python'
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.repo.runtime_version || '3.9' }}
+
+    - name: Setup PHP
+      if: matrix.repo.language == 'php'
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ matrix.repo.runtime_version || '8.1' }}
+        tools: composer
+
+    - name: Setup .NET
+      if: matrix.repo.language == 'dotnet' || matrix.repo.language == 'csharp'
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: ${{ matrix.repo.runtime_version || '6.0.x' }}
+
+    - name: Install Dependencies - Node.js
+      if: matrix.repo.language == 'node' || matrix.repo.language == 'javascript' || matrix.repo.language == 'typescript'
+      run: |
+        if [ -f package.json ]; then
+          if [ "${{ matrix.repo.install_command }}" != "" ]; then
+            ${{ matrix.repo.install_command }}
+          else
+            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+          fi
+        fi
+
+    - name: Install Dependencies - Python
+      if: matrix.repo.language == 'python'
+      run: |
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        elif [ -f Pipfile ]; then
+          pip install pipenv && pipenv install --dev
+        elif [ -f pyproject.toml ]; then
+          pip install poetry && poetry install
+        fi
+
+    - name: Install Dependencies - PHP
+      if: matrix.repo.language == 'php'
+      run: |
+        if [ -f composer.json ]; then
+          composer install --no-dev --prefer-dist
+        fi
+
+    - name: Install Dependencies - .NET
+      if: matrix.repo.language == 'dotnet' || matrix.repo.language == 'csharp'
+      run: |
+        if [ -f *.sln ]; then
+          dotnet restore
+        elif [ -f *.csproj ]; then
+          dotnet restore
+        fi
+
+    - name: Run Snyk Test
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: |
+        # Install Snyk CLI
+        npm install -g snyk
+
+        # Authenticate
+        snyk auth ${{ secrets.SNYK_TOKEN }}
+
+        # Run test based on language
+        case "${{ matrix.repo.language }}" in
+          "node"|"javascript"|"typescript")
+            snyk test --json > snyk-${{ matrix.repo.name }}-report.json || true
+            ;;
+          "python")
+            snyk test --file=requirements.txt --json > snyk-${{ matrix.repo.name }}-report.json || true
+            ;;
+          "php")
+            snyk test --file=composer.json --json > snyk-${{ matrix.repo.name }}-report.json || true
+            ;;
+          "dotnet"|"csharp")
+            if [ -f *.sln ]; then
+              snyk test --file=*.sln --json > snyk-${{ matrix.repo.name }}-report.json || true
+            else
+              snyk test --json > snyk-${{ matrix.repo.name }}-report.json || true
+            fi
+            ;;
+        esac
+
+    - name: Run Snyk Monitor
+      continue-on-error: true
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      run: |
+        case "${{ matrix.repo.language }}" in
+          "node"|"javascript"|"typescript")
+            snyk monitor --project-name="${{ matrix.repo.name }}" || true
+            ;;
+          "python")
+            snyk monitor --file=requirements.txt --project-name="${{ matrix.repo.name }}" || true
+            ;;
+          "php")
+            snyk monitor --file=composer.json --project-name="${{ matrix.repo.name }}" || true
+            ;;
+          "dotnet"|"csharp")
+            snyk monitor --project-name="${{ matrix.repo.name }}" || true
+            ;;
+        esac
+
+    - name: Generate Summary Report
+      if: always()
+      run: |
+        echo "# 📦 ${{ matrix.repo.name }} SCA Scan Results" > sca-scan-summary.md
+        echo "## Repository: ${{ matrix.repo.repository }}" >> sca-scan-summary.md
+        echo "## Language: ${{ matrix.repo.language }}" >> sca-scan-summary.md
+        echo "## Environment: ${{ matrix.repo.environment }}" >> sca-scan-summary.md
+        echo "## Scan Date: $(date)" >> sca-scan-summary.md
+        echo "" >> sca-scan-summary.md
+
+        REPORT_FILE="snyk-${{ matrix.repo.name }}-report.json"
+        if [ -f "$REPORT_FILE" ]; then
+          # Parse Snyk JSON report
+          HIGH_VULNS=$(jq '.vulnerabilities | map(select(.severity == "high")) | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          CRITICAL_VULNS=$(jq '.vulnerabilities | map(select(.severity == "critical")) | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          MEDIUM_VULNS=$(jq '.vulnerabilities | map(select(.severity == "medium")) | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          LOW_VULNS=$(jq '.vulnerabilities | map(select(.severity == "low")) | length' "$REPORT_FILE" 2>/dev/null || echo "0")
+          
+          echo "### Vulnerability Summary:" >> sca-scan-summary.md
+          echo "- 🔴 Critical: $CRITICAL_VULNS" >> sca-scan-summary.md
+          echo "- 🟠 High: $HIGH_VULNS" >> sca-scan-summary.md
+          echo "- 🟡 Medium: $MEDIUM_VULNS" >> sca-scan-summary.md
+          echo "- 🟢 Low: $LOW_VULNS" >> sca-scan-summary.md
+          echo "" >> sca-scan-summary.md
+          
+          TOTAL_VULNS=$((CRITICAL_VULNS + HIGH_VULNS + MEDIUM_VULNS + LOW_VULNS))
+          if [ "$TOTAL_VULNS" -gt 0 ]; then
+            echo "### ⚠️ Action Required: $TOTAL_VULNS vulnerabilities found" >> sca-scan-summary.md
+            echo "Please review dependencies and update to secure versions." >> sca-scan-summary.md
+            
+            # Add specific recommendations based on language
+            echo "" >> sca-scan-summary.md
+            echo "### 📋 Remediation Guidelines:" >> sca-scan-summary.md
+            case "${{ matrix.repo.language }}" in
+              "node"|"javascript"|"typescript")
+                echo "- Run \`npm audit fix\` to automatically fix vulnerabilities" >> sca-scan-summary.md
+                echo "- Update package.json dependencies to latest secure versions" >> sca-scan-summary.md
+                ;;
+              "python")
+                echo "- Update requirements.txt with secure package versions" >> sca-scan-summary.md
+                echo "- Consider using \`pip-audit\` for additional scanning" >> sca-scan-summary.md
+                ;;
+              "php")
+                echo "- Run \`composer update\` to update dependencies" >> sca-scan-summary.md
+                echo "- Update composer.json with secure package versions" >> sca-scan-summary.md
+                ;;
+              "dotnet"|"csharp")
+                echo "- Update NuGet packages to latest secure versions" >> sca-scan-summary.md
+                echo "- Run \`dotnet list package --outdated\` to check for updates" >> sca-scan-summary.md
+                ;;
+            esac
+          else
+            echo "### ✅ No vulnerabilities detected" >> sca-scan-summary.md
+          fi
+          
+          # Add top vulnerabilities if any
+          if [ "$TOTAL_VULNS" -gt 0 ]; then
+            echo "" >> sca-scan-summary.md
+            echo "### 🔍 Top Critical/High Vulnerabilities:" >> sca-scan-summary.md
+            jq -r '.vulnerabilities[] | select(.severity == "critical" or .severity == "high") | "- **\(.title)** (\(.severity | ascii_upcase)): \(.packageName)@\(.version)"' "$REPORT_FILE" | head -10 >> sca-scan-summary.md 2>/dev/null || true
+          fi
+        else
+          echo "### ℹ️ Scan completed - No detailed report available" >> sca-scan-summary.md
+          echo "This might indicate no manifest files were found or scanning failed." >> sca-scan-summary.md
+        fi
+
+    - name: Upload Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sca-report-${{ matrix.repo.name }}
+        path: |
+          snyk-${{ matrix.repo.name }}-report.json
+          sca-scan-summary.md
+        retention-days: 30
+
+  consolidate-results:
+    name: 📊 Consolidate SCA Results
+    runs-on: ubuntu-latest
+    needs: [ load-config, sca-scan ]
+    if: always()
+    steps:
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./reports
+
+    - name: Generate Consolidated Report
+      run: |
+        echo "# 📦 Consolidated SCA Scan Results" > consolidated-sca-report.md
+        echo "## Scan Date: $(date)" >> consolidated-sca-report.md
+        echo "" >> consolidated-sca-report.md
+
+        TOTAL_CRITICAL=0
+        TOTAL_HIGH=0
+        TOTAL_MEDIUM=0
+        TOTAL_LOW=0
+
+        echo "## Individual Repository Results:" >> consolidated-sca-report.md
+        echo "" >> consolidated-sca-report.md
+
+        # Process each report
+        for report_dir in ./reports/sca-report-*/; do
+          if [ -d "$report_dir" ]; then
+            REPO_NAME=$(basename "$report_dir" | sed 's/sca-report-//')
+            echo "### 📁 $REPO_NAME" >> consolidated-sca-report.md
+            
+            if [ -f "$report_dir/sca-scan-summary.md" ]; then
+              # Extract vulnerability counts from individual reports
+              cat "$report_dir/sca-scan-summary.md" | grep -A 10 "Vulnerability Summary:" >> consolidated-sca-report.md || true
+            else
+              echo "- ❌ Report not available" >> consolidated-sca-report.md
+            fi
+            echo "" >> consolidated-sca-report.md
+          fi
+        done
+
+        echo "---" >> consolidated-sca-report.md
+        echo "*Generated by GitHub Actions SCA Pipeline*" >> consolidated-sca-report.md
+
+    - name: Upload Consolidated Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: consolidated-sca-report
+        path: consolidated-sca-report.md
+        retention-days: 90
